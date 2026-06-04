@@ -124,5 +124,9 @@ To easily transfer media files to your Raspberry Pi, you can use `scp` (Secure C
 ## Contributing and License
 ROMP is open-source. If you improve the code, fix a bug, or add a feature, please share your changes back via a Pull Request! This project is licensed under the MIT License.
 
+## Repository & Links
+- **Official Repository:** [github.com/tresler/ROMP](https://github.com/tresler/ROMP)
+- **Source Code & Issue Tracker:** Available on GitHub. Contributions and bug reports are welcome.
+
 ## Disclaimer
 This program (and this project's documentation) was created with the assistance of AI. Use the software and documentation at your own risk — the author(s) provide no warranty and accept no responsibility for any damage, data loss, or other consequences arising from its use.
