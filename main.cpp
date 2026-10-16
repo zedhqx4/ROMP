@@ -767,6 +767,8 @@ int main(int argc, char* argv[]) {
             if (loadSuccess) currentVideoFileName = fileToLoad;
         }
 
+        bool videoFrameDecodedThisIteration = false;
+
         // 1. Vykreslení videa, pokud je načteno a není pauza
         if ((videoLoaded || audioStreamIndex != -1) && formatContext && !isPaused) {
             int response = 0;
@@ -840,7 +842,8 @@ int main(int argc, char* argv[]) {
             }
 
             response = avcodec_receive_frame(codecContext, frame);
-            if (response == 0) {
+                        if (response == 0) {
+                videoFrameDecodedThisIteration = true;
                 AVFrame *render_frame = frame;
 
                 if (frame->format == hw_pix_fmt && hw_pix_fmt != AV_PIX_FMT_NONE) {
@@ -933,7 +936,7 @@ int main(int argc, char* argv[]) {
             }
             nextFrameTime += frameDelay;
             if (nextFrameTime < SDL_GetTicks()) nextFrameTime = SDL_GetTicks();
-            
+
             if (frame) av_frame_unref(frame);
             if (sw_frame) av_frame_unref(sw_frame);
         } else {
