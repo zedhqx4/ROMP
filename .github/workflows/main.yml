@@ -1,0 +1,82 @@
+name: Linux build
+
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Build ROMP (Linux x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config \
+            liblo-dev libavformat-dev libavcodec-dev libavutil-dev \
+            libswscale-dev libswresample-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+            libxi-dev libxinerama-dev libxss-dev libxt-dev libxkbcommon-dev \
+            libwayland-dev libdecor-0-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libdbus-1-dev libudev-dev libibus-1.0-dev libdrm-dev libgbm-dev \
+            libpng-dev libjpeg-dev libfreetype-dev libharfbuzz-dev
+
+      - name: Build and install SDL3
+        run: |
+          git clone --depth 1 --branch release-3.2.10 https://github.com/libsdl-org/SDL.git /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF
+          cmake --build /tmp/SDL/build --parallel 2
+          sudo cmake --install /tmp/SDL/build
+
+      - name: Build and install SDL3_image
+        run: |
+          git clone --depth 1 --branch release-3.2.4 https://github.com/libsdl-org/SDL_image.git /tmp/SDL_image
+          cmake -S /tmp/SDL_image -B /tmp/SDL_image/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DSDLIMAGE_SHARED=ON -DSDLIMAGE_STATIC=OFF -DSDLIMAGE_VENDORED=OFF \
+            -DSDLIMAGE_AVIF=OFF -DSDLIMAGE_JXL=OFF -DSDLIMAGE_TIF=OFF -DSDLIMAGE_WEBP=OFF
+          cmake --build /tmp/SDL_image/build --parallel 2
+          sudo cmake --install /tmp/SDL_image/build
+
+      - name: Build and install SDL3_ttf
+        run: |
+          git clone --depth 1 --branch release-3.2.2 https://github.com/libsdl-org/SDL_ttf.git /tmp/SDL_ttf
+          cmake -S /tmp/SDL_ttf -B /tmp/SDL_ttf/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DSDLTTF_SHARED=ON -DSDLTTF_STATIC=OFF -DSDLTTF_VENDORED=OFF
+          cmake --build /tmp/SDL_ttf/build --parallel 2
+          sudo cmake --install /tmp/SDL_ttf/build
+
+      - name: Compile ROMP
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig
+        run: |
+          sudo ldconfig
+          pkg-config --modversion sdl3 sdl3-image sdl3-ttf liblo libavformat libavcodec libavutil libswscale libswresample
+          make clean
+          make -j2
+          file romp
+          ldd romp
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: romp-linux-x86_64
+          path: romp
+          if-no-files-found: error
+          retention-days: 14
