@@ -7,6 +7,7 @@
 #include "utils.h"
 #include <algorithm> // Added for std::transform
 #include <unistd.h>  // Added for access() function
+#include <fontconfig/fontconfig.h>
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -19,14 +20,117 @@ extern "C" {
 static enum AVPixelFormat hw_pix_fmt = AV_PIX_FMT_NONE;
 
 // FFmpeg HW format selection callback
-static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
-    for (const enum AVPixelFormat *p = pix_fmts; *p != -1; p++) {
-        if (*p == hw_pix_fmt)
+static enum AVPixelFormat get_hw_format(
+    AVCodecContext *ctx,
+    const enum AVPixelFormat *pix_fmts)
+{
+    for (const enum AVPixelFormat *p = pix_fmts;
+         *p != AV_PIX_FMT_NONE;
+    ++p) {
+        if (*p == hw_pix_fmt) {
             return *p;
+        }
     }
-    std::cerr << "Warning: HW format not found, using software fallback." << std::endl;
-    return pix_fmts[0];
+
+    std::cerr << "HW pixel format requested by decoder was not offered."
+    << std::endl;
+
+    // No fingir que se seleccionó el formato de hardware.
+    return AV_PIX_FMT_NONE;
 }
+
+
+// Try to open HW_decoder
+
+static bool try_open_hw_decoder(
+    const AVCodec *decoder,
+    AVCodecParameters *params,
+    AVCodecContext **out_context,
+    AVBufferRef **out_device)
+{
+    *out_context = nullptr;
+    *out_device = nullptr;
+
+    for (int i = 0; ; ++i) {
+        const AVCodecHWConfig *config =
+        avcodec_get_hw_config(decoder, i);
+
+        if (!config)
+            break;
+
+        if (!(config->methods &
+            AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
+            continue;
+
+        const char *name =
+        av_hwdevice_get_type_name(config->device_type);
+
+        std::cout << "Trying HW backend: "
+        << (name ? name : "unknown") << std::endl;
+
+        AVBufferRef *device = nullptr;
+
+        int ret = av_hwdevice_ctx_create(
+            &device, config->device_type, nullptr, nullptr, 0);
+
+        if (ret < 0)
+            continue;
+
+        AVCodecContext *ctx = avcodec_alloc_context3(decoder);
+
+        if (!ctx ||
+            avcodec_parameters_to_context(ctx, params) < 0) {
+            if (ctx)
+                avcodec_free_context(&ctx);
+            av_buffer_unref(&device);
+        continue;
+            }
+
+            hw_pix_fmt = config->pix_fmt;
+            ctx->get_format = get_hw_format;
+            ctx->hw_device_ctx = av_buffer_ref(device);
+
+            if (!ctx->hw_device_ctx) {
+                avcodec_free_context(&ctx);
+                av_buffer_unref(&device);
+                hw_pix_fmt = AV_PIX_FMT_NONE;
+                continue;
+            }
+
+            AVDictionary *opts = nullptr;
+
+            if (params->codec_id == AV_CODEC_ID_HEVC)
+                av_dict_set(&opts, "num_capture_buffers", "16", 0);
+
+        ret = avcodec_open2(ctx, decoder, &opts);
+        av_dict_free(&opts);
+
+        if (ret >= 0) {
+            *out_context = ctx;
+            *out_device = device;
+
+            std::cout << "Using HW decoder: " << decoder->name
+            << " (" << (name ? name : "unknown") << ")"
+            << std::endl;
+
+            return true;
+        }
+
+        char error[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, error, sizeof(error));
+
+        std::cerr << "HW decoder failed: " << error << std::endl;
+
+        avcodec_free_context(&ctx);
+        av_buffer_unref(&device);
+        hw_pix_fmt = AV_PIX_FMT_NONE;
+    }
+
+    return false;
+}
+
+
+
 
 // Cleanup current media resources
 void stopCurrentMedia(AVFormatContext** formatContext, 
@@ -98,11 +202,59 @@ int main(int argc, char* argv[]) {
     SDL_SetWindowFullscreen(window, true);
     SDL_HideCursor();
 
-    font = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48);
-    if (!font) {
-        std::cerr << "Failed to load font: " << SDL_GetError() << std::endl;
+
+    FcPattern* pattern = FcPatternCreate();
+
+    if (!pattern) {
+        std::cerr << "Failed to create font pattern." << std::endl;
         return -1;
     }
+
+    FcPatternAddString(
+        pattern,
+        FC_FAMILY,
+        reinterpret_cast<const FcChar8*>("DejaVu Sans")
+    );
+
+    FcPatternAddInteger(pattern, FC_WEIGHT, FC_WEIGHT_BOLD);
+
+    FcConfigSubstitute(nullptr, pattern, FcMatchPattern);
+    FcDefaultSubstitute(pattern);
+
+    FcResult result;
+    FcPattern* match = FcFontMatch(nullptr, pattern, &result);
+
+    FcPatternDestroy(pattern);
+
+    if (!match) {
+        std::cerr << "Fontconfig could not find a matching font."
+        << std::endl;
+        return -1;
+    }
+
+    FcChar8* fontPath = nullptr;
+
+    if (FcPatternGetString(match, FC_FILE, 0, &fontPath)
+        != FcResultMatch) {
+        std::cerr << "Fontconfig did not return a font file."
+        << std::endl;
+    FcPatternDestroy(match);
+    return -1;
+        }
+
+        font = TTF_OpenFont(
+            reinterpret_cast<const char*>(fontPath),
+                            48
+        );
+
+        FcPatternDestroy(match);
+
+        if (!font) {
+            std::cerr << "Failed to load font: "
+            << SDL_GetError() << std::endl;
+            return -1;
+        }
+
 
     // Initial state
     SDL_Texture* texture = nullptr;
@@ -479,111 +631,90 @@ int main(int argc, char* argv[]) {
                     frameRate = 25.0; // Fallback if header doesn't know its framerate
                 }
 
-                const AVCodec* codec = nullptr;
 
-                // 1. Pokus o hardwarový dekodér (v4l2m2m)
-                const AVCodec* hw_codec = nullptr;
+                const AVCodec *codec = nullptr;
                 bool hw_init_success = false;
+
+                hw_pix_fmt = AV_PIX_FMT_NONE;
+
+                // First: preserve the existing Raspberry Pi H.264 decoder.
                 if (codecParameters->codec_id == AV_CODEC_ID_H264) {
-                    hw_codec = avcodec_find_decoder_by_name("h264_v4l2m2m");
-                } else if (codecParameters->codec_id == AV_CODEC_ID_HEVC) {
-                    // For HEVC on RPi 4, we don't use v4l2m2m wrapper (it's stateless).
-                    // Use standard hevc decoder which finds HW acceleration via hw_config.
-                    hw_codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
-                }
+                    const AVCodec *v4l2 =
+                    avcodec_find_decoder_by_name("h264_v4l2m2m");
 
-                if (hw_codec) {
-                    codecContext = avcodec_alloc_context3(hw_codec);
-                    if (!codecContext) {
-                        std::cerr << "Error: Cannot allocate context for HW decoder (" << hw_codec->name << ")." << std::endl;
-                        // Fallback to SW will be handled below
-                    } else {
-                        avcodec_parameters_to_context(codecContext, codecParameters);
+                    if (v4l2) {
+                        AVCodecContext *ctx = avcodec_alloc_context3(v4l2);
 
-                        // Set general HW acceleration (if supported and not pure v4l2m2m)
-                        AVHWDeviceType hw_type_generic = AV_HWDEVICE_TYPE_NONE;
-                        for (int i = 0;; i++) {
-                            const AVCodecHWConfig *config = avcodec_get_hw_config(hw_codec, i);
-                            if (!config) break;
-                            if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) {
-                                // On RPi 4 for HEVC we prefer DRM (for rpivid stateless decoder)
-                                if (config->device_type == AV_HWDEVICE_TYPE_DRM) {
-                                    if (av_hwdevice_ctx_create(&hw_device_ctx, config->device_type, nullptr, nullptr, 0) == 0) {
-                                        hw_type_generic = config->device_type;
-                                        hw_pix_fmt = config->pix_fmt;
-                                        codecContext->get_format = get_hw_format; // Set callback for HW format negotiation
-                                        codecContext->hw_device_ctx = av_buffer_ref(hw_device_ctx);
-                                        std::cout << "Successfully initialized general HW acceleration context: " << av_hwdevice_get_type_name(hw_type_generic) << std::endl;
-                                        hw_init_success = true;
-                                        break;
-                                    }
-                                }
+                        if (ctx &&
+                            avcodec_parameters_to_context(ctx, codecParameters) >= 0 &&
+                            avcodec_open2(ctx, v4l2, nullptr) >= 0) {
+                            codecContext = ctx;
+                        hw_init_success = true;
+
+                        std::cout << "Using V4L2M2M decoder: "
+                        << v4l2->name << std::endl;
+                            } else if (ctx) {
+                                avcodec_free_context(&ctx);
                             }
-                        }
-                        
-                        // For v4l2m2m decoders that don't use general hw_device_ctx, reset hw_pix_fmt
-                        if (hw_type_generic == AV_HWDEVICE_TYPE_NONE && std::string(hw_codec->name).find("v4l2m2m") != std::string::npos) {
-                            std::cout << "Native V4L2M2M decoder detected, attempting to open." << std::endl;
-                            hw_pix_fmt = AV_PIX_FMT_NONE; // V4L2M2M often manages format internally
-                        }
-
-                        // Attempt to open HW decoder with stability parameters for RPi
-                        AVDictionary* opts = nullptr;
-                        if (codecParameters->codec_id == AV_CODEC_ID_HEVC) {
-                            av_dict_set(&opts, "num_capture_buffers", "16", 0); 
-                        }
-
-                        int open_res = avcodec_open2(codecContext, hw_codec, &opts);
-                        av_dict_free(&opts);
-
-                        if (open_res < 0) {
-                            char errbuf[AV_ERROR_MAX_STRING_SIZE];
-                            av_strerror(open_res, errbuf, sizeof(errbuf));
-                            std::cerr << "Warning: Cannot open HW decoder (" << hw_codec->name << "): " << errbuf << ". Falling back to SW." << std::endl;
-                            avcodec_free_context(&codecContext);
-                            codecContext = nullptr;
-                            if (hw_device_ctx) av_buffer_unref(&hw_device_ctx); 
-                            hw_device_ctx = nullptr;
-                            hw_pix_fmt = AV_PIX_FMT_NONE; 
-                        } else {
-                            hw_init_success = true;
-                            std::cout << "Using HW decoder: " << codecContext->codec->name << std::endl;
-                        }
                     }
                 }
 
-                // SW fallback
+                // Second: try FFmpeg's available generic hardware backends.
+                if (false && !hw_init_success) {
+                    codec = avcodec_find_decoder(codecParameters->codec_id);
+
+                    if (codec) {
+                        hw_init_success = try_open_hw_decoder(
+                            codec,
+                            codecParameters,
+                            &codecContext,
+                            &hw_device_ctx
+                        );
+                    }
+                }
+
+                // Third: use software decoding if hardware fails.
                 if (!hw_init_success) {
-                    codec = avcodec_find_decoder(codecParameters->codec_id); 
-                    if (!codec) {
-                        std::cerr << "Critical: Cannot find SW decoder for codec ID: " << codecParameters->codec_id << std::endl;
-                        avformat_close_input(&formatContext);
-                        videoLoaded = false;
-                        imageLoaded = false;
-                        SDL_Delay(500);
-                        continue;
-                    }
-                    codecContext = avcodec_alloc_context3(codec);
-                    if (!codecContext) {
-                        std::cerr << "Critical: Cannot allocate SW context." << std::endl;
-                        avformat_close_input(&formatContext);
-                        videoLoaded = false;
-                        imageLoaded = false;
-                        SDL_Delay(500);
-                        continue;
-                    }
-                    avcodec_parameters_to_context(codecContext, codecParameters);
-                    if (avcodec_open2(codecContext, codec, nullptr) < 0) {
-                        std::cerr << "Critical: Cannot open SW decoder (" << codec->name << ")." << std::endl;
-                        avcodec_free_context(&codecContext);
-                        codecContext = nullptr;
-                    } else {
-                        std::cout << "Using SW decoder: " << codec->name << std::endl;
-                        hw_pix_fmt = AV_PIX_FMT_NONE; 
-                        if (hw_device_ctx) av_buffer_unref(&hw_device_ctx); // Free if allocated but not used
+                    hw_pix_fmt = AV_PIX_FMT_NONE;
+
+                    if (hw_device_ctx) {
+                        av_buffer_unref(&hw_device_ctx);
                         hw_device_ctx = nullptr;
                     }
+
+                    codec = avcodec_find_decoder(codecParameters->codec_id);
+
+                    if (!codec) {
+                        std::cerr << "No decoder found for this codec." << std::endl;
+                        avformat_close_input(&formatContext);
+                        videoLoaded = false;
+                        imageLoaded = false;
+                        SDL_Delay(500);
+                        continue;
+                    }
+
+                    codecContext = avcodec_alloc_context3(codec);
+
+                    if (!codecContext ||
+                        avcodec_parameters_to_context(codecContext, codecParameters) < 0 ||
+                        avcodec_open2(codecContext, codec, nullptr) < 0) {
+
+                        std::cerr << "Could not open software decoder." << std::endl;
+
+                    if (codecContext)
+                        avcodec_free_context(&codecContext);
+
+                        avformat_close_input(&formatContext);
+                    videoLoaded = false;
+                    imageLoaded = false;
+                    SDL_Delay(500);
+                    continue;
+                        }
+
+                        std::cout << "Using software decoder: "
+                        << codec->name << std::endl;
                 }
+
 
                 if (!codecContext) { 
                     std::cerr << "Critical: No functional decoder initialized." << std::endl;
