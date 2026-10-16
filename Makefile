@@ -1,6 +1,6 @@
 CXX = g++
-CXXFLAGS = -Wall -O2 -pthread $(shell pkg-config --cflags sdl3 sdl3-image sdl3-ttf liblo libavformat libavcodec libavutil libswscale libswresample)
-LIBS = $(shell pkg-config --libs sdl3 sdl3-image sdl3-ttf liblo libavformat libavcodec libavutil libswscale libswresample)
+CXXFLAGS = -Wall -O2 -pthread $(shell pkg-config --cflags sdl3 sdl3-image sdl3-ttf liblo libavformat libavcodec libavutil libswscale libswresample fontconfig)
+LIBS = $(shell pkg-config --libs sdl3 sdl3-image sdl3-ttf liblo libavformat libavcodec libavutil libswscale libswresample fontconfig)
 
 TARGET = romp
 SRCS = main.cpp utils.cpp video_player.cpp
